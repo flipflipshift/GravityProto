@@ -41,17 +41,13 @@
     font-size: 14px;
     min-width: 260px;
   }
-  #fuel-toggle {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 13px;
-    cursor: pointer;
-    user-select: none;
-  }
-  #fuel-toggle input {
-    cursor: pointer;
-    accent-color: #00ffcc;
+  #instructions {
+    margin-top: 10px;
+    max-width: 800px;
+    text-align: center;
+    font-size: 12px;
+    color: #666;
+    line-height: 1.5;
   }
 </style>
 </head>
@@ -60,10 +56,9 @@
   <div id="controls">
     <button id="respawn">Respawn</button>
     <span id="status">Orbiting...</span>
-    <label id="fuel-toggle">
-      <input type="checkbox" id="infinite-fuel" onchange="setRefuelMode(this.checked ? 'infinite' : 'default')">
-      ∞ Fuel
-    </label>
+  </div>
+  <div id="instructions">
+    Arrow keys / WASD to thrust · Fuel recovers when not thrusting · Respawn on crash · Explore as far as you can
   </div>
   <script src="game.js"></script>
 </body>

@@ -6,7 +6,7 @@ const H  = 600;
 const THRUST_ACCEL  = 0.8;
 const MAX_SPEED     = 9.0;
 const FUEL_MAX      = 200;
-let   REFUEL_RATE   = 0.5;
+const REFUEL_RATE   = 0.5;
 
 // ── Infinite World Constants ─────────────────────────────────────────
 const CHUNK_SIZE    = 400;
@@ -20,9 +20,6 @@ const camera = { x: 0, y: 0 };
 // ── Scoring ──────────────────────────────────────────────────────────
 let maxDistFromOrigin = 0;
 let highScore = 0;
-
-// ── Refuel Mode ──────────────────────────────────────────────────────
-let refuelMode = 'default';
 
 // ── Input State ──────────────────────────────────────────────────────
 const keys = { ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false };
@@ -102,27 +99,52 @@ function generateChunkBodies(cx, cy) {
   const densityBonus = Math.min(0.3, distFromOrigin / 30000);
   const bodyCount = rng() < (0.3 + densityBonus) ? (rng() < 0.4 ? 2 : 1) : 0;
 
-  const margin = 30;
+  // Dynamic margin based on max possible radius to prevent cross-chunk overlap
+  const maxBaseRadius = 45; // 20 + 25
+  const maxRadius = maxBaseRadius * Math.sqrt(scaleFactor);
+  const margin = Math.max(50, maxRadius + 10);
   const bodies = [];
+  const GAP = 10; // minimum gap between bodies
 
   for (let i = 0; i < bodyCount; i++) {
-    const localX = margin + rng() * (CHUNK_SIZE - 2 * margin);
-    const localY = margin + rng() * (CHUNK_SIZE - 2 * margin);
-
     const baseMass = 2000 + rng() * 4000;
     const mass = baseMass * scaleFactor;
     const baseRadius = 20 + rng() * 25;
     const radius = baseRadius * Math.sqrt(scaleFactor);
-
     const colorIdx = Math.floor(rng() * BODY_COLORS.length);
 
-    bodies.push({
-      x: cx * CHUNK_SIZE + localX,
-      y: cy * CHUNK_SIZE + localY,
-      mass: mass,
-      radius: radius,
-      color: BODY_COLORS[colorIdx]
-    });
+    // Try up to 5 placements to avoid overlap with previously placed bodies
+    let placed = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const localX = margin + rng() * (CHUNK_SIZE - 2 * margin);
+      const localY = margin + rng() * (CHUNK_SIZE - 2 * margin);
+      const worldX = cx * CHUNK_SIZE + localX;
+      const worldY = cy * CHUNK_SIZE + localY;
+
+      let overlaps = false;
+      for (const existing of bodies) {
+        const dx = worldX - existing.x;
+        const dy = worldY - existing.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < radius + existing.radius + GAP) {
+          overlaps = true;
+          break;
+        }
+      }
+
+      if (!overlaps) {
+        bodies.push({
+          x: worldX,
+          y: worldY,
+          mass: mass,
+          radius: radius,
+          color: BODY_COLORS[colorIdx]
+        });
+        placed = true;
+        break;
+      }
+    }
+    // If all retries fail, skip this body
   }
 
   return bodies;
@@ -174,12 +196,6 @@ function getActiveBodies() {
 
   cachedActiveBodies = bodies;
   return bodies;
-}
-
-// ── Infinite Fuel Toggle ─────────────────────────────────────────────
-function setRefuelMode(mode) {
-  refuelMode = mode;
-  REFUEL_RATE = mode === 'infinite' ? 1.0 : 0.5;
 }
 
 // ── Spawn / Respawn ──────────────────────────────────────────────────
@@ -243,7 +259,7 @@ function updatePhysics() {
   }
 
   // Passive refueling
-  if (!thrusting || refuelMode === 'infinite') {
+  if (!thrusting) {
     rocket.fuel = Math.min(FUEL_MAX, rocket.fuel + REFUEL_RATE);
   }
 
