@@ -199,8 +199,8 @@ function updatePhysics() {
     rocket.fuel--;
   }
 
-  // Passive refueling when not thrusting
-  if (!thrusting) {
+  // Passive refueling (always in infinite mode, only when idle in default)
+  if (!thrusting || refuelMode === 'infinite') {
     rocket.fuel = Math.min(FUEL_MAX, rocket.fuel + REFUEL_RATE);
   }
 
