@@ -3,62 +3,31 @@ const G  = 1.0;
 const DT = 0.4;
 const W  = 800;
 const H  = 600;
-const EDGE_MARGIN   = 80;
-const SPAWN_CLEAR   = 60;
 const THRUST_ACCEL  = 0.8;
-const MAX_SPEED     = 8.0;
+const MAX_SPEED     = 9.0;
 const FUEL_MAX      = 200;
 let   REFUEL_RATE   = 0.5;
 
-// ── Refuel Mode ───────────────────────────────────────────────────────
-let refuelMode = 'default';  // 'default' or 'infinite'
+// ── Infinite World Constants ─────────────────────────────────────────
+const CHUNK_SIZE    = 400;
+const ACTIVE_RADIUS = 4;
+const WORLD_SEED    = 42;
+const SPAWN_ZONE_R  = 200;
 
-// ── Body Presets ──────────────────────────────────────────────────────
-const PRESETS = [
-  // 1 body — single large at center
-  [
-    { x: 400, y: 300, mass: 6000, radius: 45, color: '#ff6633' }
-  ],
-  // 2 bodies — original layout
-  [
-    { x: 250, y: 300, mass: 5000, radius: 40, color: '#ff6633' },
-    { x: 580, y: 300, mass: 3000, radius: 30, color: '#3399ff' }
-  ],
-  // 3 bodies — triangle
-  [
-    { x: 400, y: 150, mass: 4000, radius: 35, color: '#ff6633' },
-    { x: 220, y: 430, mass: 3500, radius: 32, color: '#3399ff' },
-    { x: 580, y: 430, mass: 3500, radius: 32, color: '#33ff99' }
-  ],
-  // 4 bodies — diamond
-  [
-    { x: 400, y: 120, mass: 3000, radius: 30, color: '#ff6633' },
-    { x: 400, y: 480, mass: 3000, radius: 30, color: '#3399ff' },
-    { x: 150, y: 300, mass: 3000, radius: 30, color: '#33ff99' },
-    { x: 650, y: 300, mass: 3000, radius: 30, color: '#ffcc33' }
-  ],
-  // 5 bodies — pentagon
-  (() => {
-    const cx = 400, cy = 300, r = 180;
-    const colors = ['#ff6633', '#3399ff', '#33ff99', '#ffcc33', '#cc66ff'];
-    return Array.from({ length: 5 }, (_, i) => {
-      const angle = -Math.PI / 2 + (2 * Math.PI * i) / 5;
-      return {
-        x: cx + r * Math.cos(angle),
-        y: cy + r * Math.sin(angle),
-        mass: 2500,
-        radius: 26,
-        color: colors[i]
-      };
-    });
-  })()
-];
+// ── Camera ───────────────────────────────────────────────────────────
+const camera = { x: 0, y: 0 };
 
-// ── Input State ─────────────────────────────────────────────────────
+// ── Scoring ──────────────────────────────────────────────────────────
+let maxDistFromOrigin = 0;
+let highScore = 0;
+
+// ── Refuel Mode ──────────────────────────────────────────────────────
+let refuelMode = 'default';
+
+// ── Input State ──────────────────────────────────────────────────────
 const keys = { ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false };
 window.addEventListener('keydown', (e) => {
   if (e.key in keys) { keys[e.key] = true; e.preventDefault(); }
-  // WASD bindings
   if (e.key === 'w' || e.key === 'W') { keys.ArrowUp = true; }
   if (e.key === 's' || e.key === 'S') { keys.ArrowDown = true; }
   if (e.key === 'a' || e.key === 'A') { keys.ArrowLeft = true; }
@@ -74,9 +43,6 @@ window.addEventListener('keyup', (e) => {
 window.keys = keys;
 
 // ── Game Objects ─────────────────────────────────────────────────────
-const masses = [];
-let activeBodyCount = 2;
-
 const rocket = {
   x: 0, y: 0,
   prevX: 0, prevY: 0,
@@ -84,10 +50,7 @@ const rocket = {
   crashed: false,
   fuel: FUEL_MAX
 };
-
-// Expose for Playwright / testing
 window.rocket = rocket;
-window.masses = masses;
 
 // ── Canvas Setup ─────────────────────────────────────────────────────
 const canvas = document.getElementById('canvas');
@@ -95,27 +58,123 @@ const ctx    = canvas.getContext('2d');
 const statusEl  = document.getElementById('status');
 const respawnBtn = document.getElementById('respawn');
 
-// ── Body Count Selector ──────────────────────────────────────────────
-function setBodyCount(n) {
-  n = Math.max(1, Math.min(5, n));
-  activeBodyCount = n;
+// ── Seeded PRNG (Mulberry32) ─────────────────────────────────────────
+function mulberry32(seed) {
+  return function() {
+    seed |= 0;
+    seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
 
-  // Replace masses array contents
-  masses.length = 0;
-  const preset = PRESETS[n - 1];
-  for (const p of preset) {
-    masses.push({ x: p.x, y: p.y, mass: p.mass, radius: p.radius, color: p.color });
+function chunkSeed(cx, cy) {
+  // Hash combining chunk coords with world seed
+  let h = WORLD_SEED;
+  h = (h ^ (cx * 374761393)) & 0xFFFFFFFF;
+  h = (h ^ (cy * 668265263)) & 0xFFFFFFFF;
+  h = ((h ^ (h >>> 13)) * 1274126177) & 0xFFFFFFFF;
+  return h;
+}
+
+// ── Chunk-Based Procedural Generation ────────────────────────────────
+const chunkCache = new Map();
+const BODY_COLORS = ['#ff6633', '#3399ff', '#33ff99', '#ffcc33', '#cc66ff', '#ff3399', '#33ccff'];
+
+function generateChunkBodies(cx, cy) {
+  const rng = mulberry32(chunkSeed(cx, cy));
+
+  // Chunk center in world coords
+  const chunkWorldX = cx * CHUNK_SIZE + CHUNK_SIZE / 2;
+  const chunkWorldY = cy * CHUNK_SIZE + CHUNK_SIZE / 2;
+
+  // Distance from origin to chunk center
+  const distFromOrigin = Math.sqrt(chunkWorldX * chunkWorldX + chunkWorldY * chunkWorldY);
+
+  // Skip chunks within spawn safe zone
+  if (distFromOrigin < SPAWN_ZONE_R) return [];
+
+  // Progressive scaling factor
+  const scaleFactor = 1.0 + distFromOrigin / 20000;
+
+  // Base: 0-2 bodies. Slight density increase at distance
+  const densityBonus = Math.min(0.3, distFromOrigin / 30000);
+  const bodyCount = rng() < (0.3 + densityBonus) ? (rng() < 0.4 ? 2 : 1) : 0;
+
+  const margin = 30;
+  const bodies = [];
+
+  for (let i = 0; i < bodyCount; i++) {
+    const localX = margin + rng() * (CHUNK_SIZE - 2 * margin);
+    const localY = margin + rng() * (CHUNK_SIZE - 2 * margin);
+
+    const baseMass = 2000 + rng() * 4000;
+    const mass = baseMass * scaleFactor;
+    const baseRadius = 20 + rng() * 25;
+    const radius = baseRadius * Math.sqrt(scaleFactor);
+
+    const colorIdx = Math.floor(rng() * BODY_COLORS.length);
+
+    bodies.push({
+      x: cx * CHUNK_SIZE + localX,
+      y: cy * CHUNK_SIZE + localY,
+      mass: mass,
+      radius: radius,
+      color: BODY_COLORS[colorIdx]
+    });
   }
 
-  // Update button highlights
-  const buttons = document.querySelectorAll('#body-selector button');
-  buttons.forEach((btn, i) => {
-    btn.classList.toggle('active', i + 1 === n);
-  });
-
-  spawnRocket();
+  return bodies;
 }
-window.setBodyCount = setBodyCount;
+
+function getChunkBodies(cx, cy) {
+  const key = cx + ',' + cy;
+  if (chunkCache.has(key)) return chunkCache.get(key);
+  const bodies = generateChunkBodies(cx, cy);
+  chunkCache.set(key, bodies);
+  return bodies;
+}
+
+let cachedActiveBodies = [];
+
+function getActiveBodies() {
+  // Camera center in world coords
+  const centerX = camera.x + W / 2;
+  const centerY = camera.y + H / 2;
+
+  // Which chunk is the camera center in?
+  const ccx = Math.floor(centerX / CHUNK_SIZE);
+  const ccy = Math.floor(centerY / CHUNK_SIZE);
+
+  const activeKeys = new Set();
+  const bodies = [];
+
+  for (let dx = -ACTIVE_RADIUS; dx <= ACTIVE_RADIUS; dx++) {
+    for (let dy = -ACTIVE_RADIUS; dy <= ACTIVE_RADIUS; dy++) {
+      const cx = ccx + dx;
+      const cy = ccy + dy;
+      const key = cx + ',' + cy;
+      activeKeys.add(key);
+      const chunkBodies = getChunkBodies(cx, cy);
+      for (const b of chunkBodies) {
+        bodies.push(b);
+      }
+    }
+  }
+
+  // Evict stale cache entries (keep only active + 2 chunk buffer)
+  if (chunkCache.size > (ACTIVE_RADIUS * 2 + 5) * (ACTIVE_RADIUS * 2 + 5)) {
+    for (const key of chunkCache.keys()) {
+      if (!activeKeys.has(key)) {
+        chunkCache.delete(key);
+      }
+    }
+  }
+
+  cachedActiveBodies = bodies;
+  return bodies;
+}
 
 // ── Infinite Fuel Toggle ─────────────────────────────────────────────
 function setRefuelMode(mode) {
@@ -125,55 +184,37 @@ function setRefuelMode(mode) {
 
 // ── Spawn / Respawn ──────────────────────────────────────────────────
 function spawnRocket() {
-  for (let attempts = 0; attempts < 200; attempts++) {
-    const rx = EDGE_MARGIN + Math.random() * (W - 2 * EDGE_MARGIN);
-    const ry = EDGE_MARGIN + Math.random() * (H - 2 * EDGE_MARGIN);
+  rocket.x = 0;
+  rocket.y = 0;
 
-    let tooClose = false;
-    for (const m of masses) {
-      const dx = rx - m.x;
-      const dy = ry - m.y;
-      if (Math.sqrt(dx * dx + dy * dy) < m.radius + SPAWN_CLEAR) {
-        tooClose = true;
-        break;
-      }
-    }
-    if (tooClose) continue;
+  // Small random initial velocity via Verlet prev-position offset
+  const vx = (Math.random() - 0.5) * 2.0;
+  const vy = (Math.random() - 0.5) * 2.0;
+  rocket.prevX = -vx * DT;
+  rocket.prevY = -vy * DT;
 
-    rocket.x = rx;
-    rocket.y = ry;
-
-    // Small random initial velocity via Verlet prev-position offset
-    const vx = (Math.random() - 0.5) * 2.0;
-    const vy = (Math.random() - 0.5) * 2.0;
-    rocket.prevX = rx - vx * DT;
-    rocket.prevY = ry - vy * DT;
-
-    rocket.crashed = false;
-    rocket.fuel = FUEL_MAX;
-    statusEl.textContent = 'Orbiting...';
-    statusEl.style.color = '#ccc';
-    return;
-  }
-  // Fallback (should never hit)
-  rocket.x = W / 2;
-  rocket.y = 100;
-  rocket.prevX = rocket.x;
-  rocket.prevY = rocket.y;
   rocket.crashed = false;
+  rocket.fuel = FUEL_MAX;
+  maxDistFromOrigin = 0;
+
+  // Reset camera to center on rocket
+  camera.x = rocket.x - W / 2;
+  camera.y = rocket.y - H / 2;
+
+  statusEl.textContent = 'Orbiting...';
+  statusEl.style.color = '#ccc';
 }
 
 respawnBtn.addEventListener('click', spawnRocket);
 
 // ── Physics (Störmer-Verlet) ─────────────────────────────────────────
-function computeAcceleration(px, py) {
+function computeAcceleration(px, py, activeBodies) {
   let ax = 0, ay = 0;
-  for (const m of masses) {
+  for (const m of activeBodies) {
     let dx = m.x - px;
     let dy = m.y - py;
     let dist = Math.sqrt(dx * dx + dy * dy);
 
-    // Softening: clamp distance to prevent blowup near surface
     const minDist = m.radius * 0.5;
     if (dist < minDist) dist = minDist;
 
@@ -187,7 +228,9 @@ function computeAcceleration(px, py) {
 function updatePhysics() {
   if (rocket.crashed) return;
 
-  let { ax, ay } = computeAcceleration(rocket.x, rocket.y);
+  const activeBodies = getActiveBodies();
+
+  let { ax, ay } = computeAcceleration(rocket.x, rocket.y, activeBodies);
 
   // Thrust
   const thrusting = (keys.ArrowUp || keys.ArrowDown || keys.ArrowLeft || keys.ArrowRight) && rocket.fuel > 0;
@@ -199,24 +242,22 @@ function updatePhysics() {
     rocket.fuel--;
   }
 
-  // Passive refueling (always in infinite mode, only when idle in default)
+  // Passive refueling
   if (!thrusting || refuelMode === 'infinite') {
     rocket.fuel = Math.min(FUEL_MAX, rocket.fuel + REFUEL_RATE);
   }
 
   // Update status text
-  if (!rocket.crashed) {
-    const anyKeyHeld = keys.ArrowUp || keys.ArrowDown || keys.ArrowLeft || keys.ArrowRight;
-    if (anyKeyHeld && rocket.fuel <= 0) {
-      statusEl.textContent = 'NO FUEL';
-      statusEl.style.color = '#ff6633';
-    } else if (thrusting) {
-      statusEl.textContent = 'Thrusting...';
-      statusEl.style.color = '#00ffcc';
-    } else {
-      statusEl.textContent = 'Orbiting...';
-      statusEl.style.color = '#ccc';
-    }
+  const anyKeyHeld = keys.ArrowUp || keys.ArrowDown || keys.ArrowLeft || keys.ArrowRight;
+  if (anyKeyHeld && rocket.fuel <= 0) {
+    statusEl.textContent = 'NO FUEL';
+    statusEl.style.color = '#ff6633';
+  } else if (thrusting) {
+    statusEl.textContent = 'Thrusting...';
+    statusEl.style.color = '#00ffcc';
+  } else {
+    statusEl.textContent = 'Orbiting...';
+    statusEl.style.color = '#ccc';
   }
 
   // Störmer-Verlet integration
@@ -238,13 +279,12 @@ function updatePhysics() {
     rocket.y = rocket.prevY + dy * scale;
   }
 
-  // Collision with masses
-  for (const m of masses) {
+  // Collision with active bodies
+  for (const m of activeBodies) {
     const cdx = rocket.x - m.x;
     const cdy = rocket.y - m.y;
     const dist = Math.sqrt(cdx * cdx + cdy * cdy);
     if (dist <= m.radius + rocket.radius) {
-      // Snap to surface
       const nx = cdx / dist;
       const ny = cdy / dist;
       rocket.x = m.x + nx * (m.radius + rocket.radius);
@@ -254,16 +294,153 @@ function updatePhysics() {
     }
   }
 
-  // Off-screen bounds check
-  if (rocket.x < -50 || rocket.x > W + 50 || rocket.y < -50 || rocket.y > H + 50) {
-    crash();
+  // Update camera to keep rocket centered
+  camera.x = rocket.x - W / 2;
+  camera.y = rocket.y - H / 2;
+
+  // Track distance from origin for scoring
+  const distFromOrigin = Math.sqrt(rocket.x * rocket.x + rocket.y * rocket.y);
+  if (distFromOrigin > maxDistFromOrigin) {
+    maxDistFromOrigin = distFromOrigin;
   }
 }
 
 function crash() {
   rocket.crashed = true;
+  if (maxDistFromOrigin > highScore) {
+    highScore = maxDistFromOrigin;
+  }
   statusEl.textContent = 'CRASHED — press Respawn';
   statusEl.style.color = '#ff0044';
+}
+
+// ── Starfield ────────────────────────────────────────────────────────
+const STAR_TILE_SIZE = 512;
+const STAR_DENSITY = 80;    // stars per tile
+const PARALLAX = 0.3;       // stars move slower than camera for depth
+
+function drawStarfield() {
+  const offX = camera.x * PARALLAX;
+  const offY = camera.y * PARALLAX;
+
+  // Which tiles are visible?
+  const startTX = Math.floor(offX / STAR_TILE_SIZE) - 1;
+  const startTY = Math.floor(offY / STAR_TILE_SIZE) - 1;
+  const endTX = Math.floor((offX + W) / STAR_TILE_SIZE) + 1;
+  const endTY = Math.floor((offY + H) / STAR_TILE_SIZE) + 1;
+
+  for (let tx = startTX; tx <= endTX; tx++) {
+    for (let ty = startTY; ty <= endTY; ty++) {
+      const rng = mulberry32(chunkSeed(tx * 7 + 1000, ty * 7 + 1000));
+      for (let i = 0; i < STAR_DENSITY; i++) {
+        const sx = tx * STAR_TILE_SIZE + rng() * STAR_TILE_SIZE - offX;
+        const sy = ty * STAR_TILE_SIZE + rng() * STAR_TILE_SIZE - offY;
+        const brightness = 0.3 + rng() * 0.7;
+        const size = rng() < 0.1 ? 1.5 : 0.8;
+
+        if (sx < -5 || sx > W + 5 || sy < -5 || sy > H + 5) continue;
+
+        ctx.fillStyle = `rgba(255, 255, 255, ${brightness})`;
+        ctx.fillRect(sx, sy, size, size);
+      }
+    }
+  }
+}
+
+// ── Minimap ──────────────────────────────────────────────────────────
+const MINIMAP_SIZE = 120;
+const MINIMAP_MARGIN = 10;
+const MINIMAP_RANGE = 3000; // world units shown in minimap
+
+function drawMinimap(activeBodies) {
+  const mx = W - MINIMAP_SIZE - MINIMAP_MARGIN;
+  const my = H - MINIMAP_SIZE - MINIMAP_MARGIN;
+  const scale = MINIMAP_SIZE / (MINIMAP_RANGE * 2);
+
+  // Background
+  ctx.fillStyle = 'rgba(10, 10, 20, 0.8)';
+  ctx.fillRect(mx, my, MINIMAP_SIZE, MINIMAP_SIZE);
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(mx, my, MINIMAP_SIZE, MINIMAP_SIZE);
+
+  const centerMX = mx + MINIMAP_SIZE / 2;
+  const centerMY = my + MINIMAP_SIZE / 2;
+
+  // Origin marker (crosshair)
+  const originDX = (0 - rocket.x) * scale;
+  const originDY = (0 - rocket.y) * scale;
+  const originScreenX = centerMX + originDX;
+  const originScreenY = centerMY + originDY;
+
+  if (originScreenX >= mx && originScreenX <= mx + MINIMAP_SIZE &&
+      originScreenY >= my && originScreenY <= my + MINIMAP_SIZE) {
+    ctx.strokeStyle = '#ffcc33';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(originScreenX - 4, originScreenY);
+    ctx.lineTo(originScreenX + 4, originScreenY);
+    ctx.moveTo(originScreenX, originScreenY - 4);
+    ctx.lineTo(originScreenX, originScreenY + 4);
+    ctx.stroke();
+  } else {
+    // Draw arrow pointing toward origin at minimap edge
+    const angle = Math.atan2(originDY, originDX);
+    const edgeX = centerMX + Math.cos(angle) * (MINIMAP_SIZE / 2 - 6);
+    const edgeY = centerMY + Math.sin(angle) * (MINIMAP_SIZE / 2 - 6);
+    // Clamp to minimap bounds
+    const clampedX = Math.max(mx + 3, Math.min(mx + MINIMAP_SIZE - 3, edgeX));
+    const clampedY = Math.max(my + 3, Math.min(my + MINIMAP_SIZE - 3, edgeY));
+    ctx.fillStyle = '#ffcc33';
+    ctx.beginPath();
+    ctx.arc(clampedX, clampedY, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Draw bodies as dots
+  for (const b of activeBodies) {
+    const bdx = (b.x - rocket.x) * scale;
+    const bdy = (b.y - rocket.y) * scale;
+    const bsx = centerMX + bdx;
+    const bsy = centerMY + bdy;
+
+    if (bsx >= mx && bsx <= mx + MINIMAP_SIZE &&
+        bsy >= my && bsy <= my + MINIMAP_SIZE) {
+      ctx.fillStyle = b.color;
+      ctx.beginPath();
+      ctx.arc(bsx, bsy, Math.max(1.5, b.radius * scale * 2), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Rocket position (always at center)
+  ctx.fillStyle = '#00ffcc';
+  ctx.beginPath();
+  ctx.arc(centerMX, centerMY, 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Label
+  ctx.fillStyle = '#666';
+  ctx.font = '9px Courier New';
+  ctx.fillText('MAP', mx + 3, my + 10);
+}
+
+// ── Score Display ────────────────────────────────────────────────────
+function drawScore() {
+  const dist = Math.floor(Math.sqrt(rocket.x * rocket.x + rocket.y * rocket.y));
+  const best = Math.floor(maxDistFromOrigin);
+  const high = Math.floor(highScore);
+
+  ctx.fillStyle = '#888';
+  ctx.font = '12px Courier New';
+  ctx.textAlign = 'right';
+  ctx.fillText(`Dist: ${dist}`, W - MINIMAP_SIZE - MINIMAP_MARGIN - 10, H - MINIMAP_SIZE - MINIMAP_MARGIN + 15);
+  ctx.fillText(`Best: ${best}`, W - MINIMAP_SIZE - MINIMAP_MARGIN - 10, H - MINIMAP_SIZE - MINIMAP_MARGIN + 30);
+  if (high > 0) {
+    ctx.fillStyle = '#ffcc33';
+    ctx.fillText(`High: ${high}`, W - MINIMAP_SIZE - MINIMAP_MARGIN - 10, H - MINIMAP_SIZE - MINIMAP_MARGIN + 45);
+  }
+  ctx.textAlign = 'left';
 }
 
 // ── Rendering ────────────────────────────────────────────────────────
@@ -285,7 +462,6 @@ function drawMass(m) {
 }
 
 function drawRocket() {
-  // Exhaust glow when thrusting
   const thrusting = (keys.ArrowUp || keys.ArrowDown || keys.ArrowLeft || keys.ArrowRight) && rocket.fuel > 0 && !rocket.crashed;
   if (thrusting) {
     const exOff = 8;
@@ -318,34 +494,53 @@ function drawFuelBar() {
   const barH = 12;
   const fuelRatio = rocket.fuel / FUEL_MAX;
 
-  // Background
   ctx.fillStyle = '#222';
   ctx.fillRect(barX, barY, barW, barH);
 
-  // Fill
   ctx.fillStyle = fuelRatio > 0.25 ? '#00ffcc' : '#ff6633';
   ctx.fillRect(barX, barY, barW * fuelRatio, barH);
 
-  // Outline
   ctx.strokeStyle = '#555';
   ctx.lineWidth = 1;
   ctx.strokeRect(barX, barY, barW, barH);
 
-  // Label
   ctx.fillStyle = '#ccc';
   ctx.font = '11px Courier New';
   ctx.fillText('FUEL', barX + barW + 6, barY + 10);
 }
 
 function render() {
+  // Clear screen
   ctx.fillStyle = '#0a0a0f';
   ctx.fillRect(0, 0, W, H);
 
-  for (const m of masses) {
+  // Starfield (drawn in screen space with parallax)
+  drawStarfield();
+
+  // World-space drawing (bodies + rocket)
+  ctx.save();
+  ctx.translate(-camera.x, -camera.y);
+
+  // Draw active bodies (with culling)
+  const viewMargin = 100;
+  for (const m of cachedActiveBodies) {
+    // Cull off-screen bodies
+    const screenX = m.x - camera.x;
+    const screenY = m.y - camera.y;
+    if (screenX < -viewMargin - m.radius * 2 || screenX > W + viewMargin + m.radius * 2 ||
+        screenY < -viewMargin - m.radius * 2 || screenY > H + viewMargin + m.radius * 2) {
+      continue;
+    }
     drawMass(m);
   }
+
   drawRocket();
+  ctx.restore();
+
+  // HUD (screen-space)
   drawFuelBar();
+  drawScore();
+  drawMinimap(cachedActiveBodies);
 }
 
 // ── Game Loop ────────────────────────────────────────────────────────
@@ -356,5 +551,5 @@ function loop() {
 }
 
 // ── Start ────────────────────────────────────────────────────────────
-setBodyCount(2);  // Default to 2 bodies (matches original behavior)
+spawnRocket();
 loop();
