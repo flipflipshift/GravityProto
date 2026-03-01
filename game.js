@@ -4,7 +4,9 @@ const DT = 0.4;
 const W  = 800;
 const H  = 600;
 const THRUST_ACCEL  = 0.8;
-const MAX_SPEED     = 25.0;
+const MAX_SPEED     = 20.0;
+const SPEED_OF_LIGHT = 18.0;
+const SPACE_DRAG    = 0.0003;
 const FUEL_MAX      = 200;
 const REFUEL_RATE   = 0.5;
 
@@ -169,7 +171,7 @@ function generateChunkBodies(cx, cy) {
         const ringRoll = vizRng();
         const hasRing = planetType === 3 || ringRoll < 0.15;
         const ringAngle = vizRng() * Math.PI * 0.4 - Math.PI * 0.2;
-        const atmosphereOpacity = 0.15 + vizRng() * 0.25;
+        const atmosphereOpacity = 0.10 + vizRng() * 0.15;
         bodies.push({
           x: worldX,
           y: worldY,
@@ -291,13 +293,19 @@ function updatePhysics() {
 
   let { ax, ay } = computeAcceleration(rocket.x, rocket.y, activeBodies);
 
-  // Thrust
+  // Thrust (relativistic: Lorentz factor reduces effectiveness near c)
   const thrusting = (keys.ArrowUp || keys.ArrowDown || keys.ArrowLeft || keys.ArrowRight) && rocket.fuel > 0;
   if (thrusting) {
-    if (keys.ArrowUp)    ay -= THRUST_ACCEL;
-    if (keys.ArrowDown)  ay += THRUST_ACCEL;
-    if (keys.ArrowLeft)  ax -= THRUST_ACCEL;
-    if (keys.ArrowRight) ax += THRUST_ACCEL;
+    const vxT = (rocket.x - rocket.prevX) / DT;
+    const vyT = (rocket.y - rocket.prevY) / DT;
+    const speed = Math.sqrt(vxT * vxT + vyT * vyT);
+    const beta = Math.min(speed / SPEED_OF_LIGHT, 0.9999);
+    const lorentzFactor = 1 / Math.sqrt(1 - beta * beta);
+    const effectiveThrust = THRUST_ACCEL / lorentzFactor;
+    if (keys.ArrowUp)    ay -= effectiveThrust;
+    if (keys.ArrowDown)  ay += effectiveThrust;
+    if (keys.ArrowLeft)  ax -= effectiveThrust;
+    if (keys.ArrowRight) ax += effectiveThrust;
     rocket.fuel--;
   }
 
@@ -328,7 +336,13 @@ function updatePhysics() {
   rocket.x = newX;
   rocket.y = newY;
 
-  // Speed cap
+  // Subtle space drag
+  const vdx = rocket.x - rocket.prevX;
+  const vdy = rocket.y - rocket.prevY;
+  rocket.x = rocket.prevX + vdx * (1 - SPACE_DRAG);
+  rocket.y = rocket.prevY + vdy * (1 - SPACE_DRAG);
+
+  // Hard speed cap (emergency safety net)
   const dx = rocket.x - rocket.prevX;
   const dy = rocket.y - rocket.prevY;
   const speed = Math.sqrt(dx * dx + dy * dy);
@@ -376,7 +390,7 @@ function crash() {
 // ── Starfield ────────────────────────────────────────────────────────
 const STAR_TILE_SIZE = 512;
 const STAR_DENSITY = 80;    // stars per tile
-const PARALLAX = 0.3;       // stars move slower than camera for depth
+const PARALLAX = 0.15;      // stars drift at 15% of camera speed
 const STAR_COLORS = [
   [255, 255, 255], // white (most common)
   [255, 255, 255],
@@ -392,14 +406,17 @@ const STAR_COLORS = [
 
 // ── Nebula System ────────────────────────────────────────────────────
 const NEBULA_TILE_SIZE = 1024;
-const NEBULA_PARALLAX = 0.1;
+const NEBULA_PARALLAX = 0.05;
 const nebulaTileCache = new Map();
 const NEBULA_COLORS = [
-  [40, 20, 120],   // deep blue
-  [80, 30, 140],   // purple
-  [120, 20, 100],  // magenta
-  [30, 50, 130],   // royal blue
-  [60, 20, 80],    // dark violet
+  [70, 40, 180],   // deep blue (brightened)
+  [130, 60, 200],  // purple (brightened)
+  [180, 50, 150],  // magenta (brightened)
+  [50, 90, 190],   // royal blue (brightened)
+  [100, 40, 130],  // dark violet (brightened)
+  [180, 60, 80],   // crimson (warm)
+  [60, 120, 160],  // teal (warm)
+  [140, 80, 50],   // amber (warm)
 ];
 
 function renderNebulaTile(tx, ty) {
@@ -409,19 +426,19 @@ function renderNebulaTile(tx, ty) {
   const c = oc.getContext('2d');
 
   const rng = mulberry32(chunkSeed(tx * 13 + 5000, ty * 13 + 5000));
-  const blobCount = Math.floor(rng() * 3); // 0-2 blobs
+  const blobCount = 1 + Math.floor(rng() * 3); // 1-3 blobs (every tile gets at least one)
 
   for (let i = 0; i < blobCount; i++) {
     const bx = rng() * NEBULA_TILE_SIZE;
     const by = rng() * NEBULA_TILE_SIZE;
-    const br = 200 + rng() * 300;
+    const br = 250 + rng() * 400;
     const colorIdx = Math.floor(rng() * NEBULA_COLORS.length);
     const nc = NEBULA_COLORS[colorIdx];
-    const opacity = 0.03 + rng() * 0.03;
+    const opacity = 0.08 + rng() * 0.07;
 
     const grad = c.createRadialGradient(bx, by, 0, bx, by, br);
     grad.addColorStop(0, `rgba(${nc[0]}, ${nc[1]}, ${nc[2]}, ${opacity})`);
-    grad.addColorStop(0.6, `rgba(${nc[0]}, ${nc[1]}, ${nc[2]}, ${opacity * 0.4})`);
+    grad.addColorStop(0.5, `rgba(${nc[0]}, ${nc[1]}, ${nc[2]}, ${opacity * 0.5})`);
     grad.addColorStop(1, 'transparent');
     c.beginPath();
     c.arc(bx, by, br, 0, Math.PI * 2);
@@ -616,11 +633,11 @@ function renderPlanetToCache(body) {
   const rng = mulberry32(body.featureSeed);
 
   // ── Outer glow ──
-  const glowGrad = c.createRadialGradient(cx, cy, r * 0.5, cx, cy, r + pad * 0.7);
-  glowGrad.addColorStop(0, colorWithAlpha(body.color, 0.35));
+  const glowGrad = c.createRadialGradient(cx, cy, r * 0.6, cx, cy, r + pad * 0.5);
+  glowGrad.addColorStop(0, colorWithAlpha(body.color, 0.18));
   glowGrad.addColorStop(1, 'transparent');
   c.beginPath();
-  c.arc(cx, cy, r + pad * 0.7, 0, Math.PI * 2);
+  c.arc(cx, cy, r + pad * 0.5, 0, Math.PI * 2);
   c.fillStyle = glowGrad;
   c.fill();
 
@@ -628,7 +645,7 @@ function renderPlanetToCache(body) {
   const lightX = cx - r * 0.35;
   const lightY = cy - r * 0.35;
   const sphereGrad = c.createRadialGradient(lightX, lightY, r * 0.05, cx, cy, r);
-  sphereGrad.addColorStop(0, hslToString(hsl.h, hsl.s * 0.7, Math.min(90, hsl.l + 30)));
+  sphereGrad.addColorStop(0, hslToString(hsl.h, hsl.s * 0.7, Math.min(80, hsl.l + 18)));
   sphereGrad.addColorStop(0.5, body.color);
   sphereGrad.addColorStop(1, hslToString(hsl.h, hsl.s * 0.9, Math.max(8, hsl.l - 25)));
   c.beginPath();
@@ -650,7 +667,7 @@ function renderPlanetToCache(body) {
         const hueShift = (rng() - 0.5) * 30;
         const lShift = (rng() - 0.5) * 15;
         c.fillStyle = hslToString(hsl.h + hueShift, hsl.s, hsl.l + lShift);
-        c.globalAlpha = 0.3 + rng() * 0.2;
+        c.globalAlpha = 0.2 + rng() * 0.15;
         c.fillRect(cx - r, cy - r + b * bandH, r * 2, bandH);
       }
       break;
@@ -666,13 +683,13 @@ function renderPlanetToCache(body) {
         c.beginPath();
         c.arc(crX, crY, crR, 0, Math.PI * 2);
         c.fillStyle = hslToString(hsl.h, hsl.s * 0.5, Math.max(5, hsl.l - 20));
-        c.globalAlpha = 0.5 + rng() * 0.3;
+        c.globalAlpha = 0.35 + rng() * 0.2;
         c.fill();
         // Crater rim highlight
         c.beginPath();
         c.arc(crX - crR * 0.2, crY - crR * 0.2, crR * 0.6, 0, Math.PI * 2);
         c.fillStyle = hslToString(hsl.h, hsl.s * 0.4, hsl.l - 10);
-        c.globalAlpha = 0.2;
+        c.globalAlpha = 0.15;
         c.fill();
       }
       break;
@@ -686,10 +703,10 @@ function renderPlanetToCache(body) {
         const spY = cy + Math.sin(angle) * dist;
         const spR = r * (0.08 + rng() * 0.1);
         const hotGrad = c.createRadialGradient(spX, spY, 0, spX, spY, spR);
-        hotGrad.addColorStop(0, 'rgba(255, 255, 200, 0.8)');
-        hotGrad.addColorStop(0.4, 'rgba(255, 150, 50, 0.5)');
+        hotGrad.addColorStop(0, 'rgba(255, 220, 160, 0.5)');
+        hotGrad.addColorStop(0.4, 'rgba(255, 150, 50, 0.3)');
         hotGrad.addColorStop(1, 'rgba(255, 80, 20, 0)');
-        c.globalAlpha = 0.7 + rng() * 0.3;
+        c.globalAlpha = 0.45 + rng() * 0.2;
         c.beginPath();
         c.arc(spX, spY, spR, 0, Math.PI * 2);
         c.fillStyle = hotGrad;
@@ -703,7 +720,7 @@ function renderPlanetToCache(body) {
       for (let b = 0; b < bandCount; b++) {
         const lShift = (rng() - 0.5) * 8;
         c.fillStyle = hslToString(hsl.h, hsl.s * 0.8, hsl.l + lShift);
-        c.globalAlpha = 0.15 + rng() * 0.1;
+        c.globalAlpha = 0.12 + rng() * 0.08;
         c.fillRect(cx - r, cy - r + b * bandH, r * 2, bandH);
       }
       break;
@@ -720,7 +737,7 @@ function renderPlanetToCache(body) {
         c.arc(cx + arcOffX, cy + arcOffY, arcR, startAngle, startAngle + arcLen);
         c.strokeStyle = hslToString(hsl.h + (rng() - 0.5) * 40, hsl.s, Math.min(85, hsl.l + 15));
         c.lineWidth = r * (0.06 + rng() * 0.08);
-        c.globalAlpha = 0.35 + rng() * 0.25;
+        c.globalAlpha = 0.25 + rng() * 0.15;
         c.stroke();
       }
       break;
@@ -802,14 +819,14 @@ function renderShipCanvas(crashed) {
     grad.addColorStop(0, '#ff6666');
     grad.addColorStop(1, '#990022');
   } else {
-    grad.addColorStop(0, '#ffffff');
-    grad.addColorStop(1, '#00ccaa');
+    grad.addColorStop(0, '#cceeee');
+    grad.addColorStop(1, '#008877');
   }
   c.fillStyle = grad;
   c.fill();
 
   // Edge stroke
-  c.strokeStyle = crashed ? '#ff0044' : '#00ffcc';
+  c.strokeStyle = crashed ? '#ff0044' : '#009988';
   c.lineWidth = 0.8;
   c.stroke();
 
@@ -834,12 +851,12 @@ function drawRocket() {
 
   // Pulsing shield aura (alive only)
   if (!rocket.crashed) {
-    const pulse = 0.12 + Math.sin(Date.now() * 0.004) * 0.06;
-    const auraGrad = ctx.createRadialGradient(rocket.x, rocket.y, rocket.radius, rocket.x, rocket.y, rocket.radius * 2.5);
+    const pulse = 0.06 + Math.sin(Date.now() * 0.004) * 0.03;
+    const auraGrad = ctx.createRadialGradient(rocket.x, rocket.y, rocket.radius, rocket.x, rocket.y, rocket.radius * 2.0);
     auraGrad.addColorStop(0, `rgba(0, 255, 200, ${pulse})`);
     auraGrad.addColorStop(1, 'transparent');
     ctx.beginPath();
-    ctx.arc(rocket.x, rocket.y, rocket.radius * 2.5, 0, Math.PI * 2);
+    ctx.arc(rocket.x, rocket.y, rocket.radius * 2.0, 0, Math.PI * 2);
     ctx.fillStyle = auraGrad;
     ctx.fill();
   }
@@ -854,8 +871,8 @@ function drawRocket() {
 function drawExhaust(ex, ey) {
   // Outer exhaust glow
   const grad = ctx.createRadialGradient(ex, ey, 0, ex, ey, 8);
-  grad.addColorStop(0, 'rgba(255, 220, 100, 0.9)');
-  grad.addColorStop(0.4, 'rgba(255, 150, 40, 0.5)');
+  grad.addColorStop(0, 'rgba(255, 220, 100, 0.6)');
+  grad.addColorStop(0.4, 'rgba(255, 150, 40, 0.3)');
   grad.addColorStop(1, 'rgba(255, 80, 20, 0)');
   ctx.beginPath();
   ctx.arc(ex, ey, 8, 0, Math.PI * 2);
@@ -864,7 +881,7 @@ function drawExhaust(ex, ey) {
 
   // White-hot inner core
   const coreGrad = ctx.createRadialGradient(ex, ey, 0, ex, ey, 3);
-  coreGrad.addColorStop(0, 'rgba(255, 255, 255, 0.9)');
+  coreGrad.addColorStop(0, 'rgba(255, 255, 255, 0.6)');
   coreGrad.addColorStop(1, 'rgba(255, 255, 200, 0)');
   ctx.beginPath();
   ctx.arc(ex, ey, 3, 0, Math.PI * 2);
@@ -898,8 +915,8 @@ function render() {
   // Deep space gradient background
   const hueShift = ((camera.x * 0.001 + camera.y * 0.0007) % 360 + 360) % 360;
   const bgGrad = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, W * 0.8);
-  bgGrad.addColorStop(0, hslToString(220 + hueShift * 0.1, 15, 6));
-  bgGrad.addColorStop(1, hslToString(240 + hueShift * 0.05, 10, 3));
+  bgGrad.addColorStop(0, hslToString(220 + hueShift * 0.3, 18, 7));
+  bgGrad.addColorStop(1, hslToString(240 + hueShift * 0.15, 10, 3));
   ctx.fillStyle = bgGrad;
   ctx.fillRect(0, 0, W, H);
 
