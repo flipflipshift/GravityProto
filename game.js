@@ -171,7 +171,7 @@ function generateChunkBodies(cx, cy) {
         const ringRoll = vizRng();
         const hasRing = planetType === 3 || ringRoll < 0.15;
         const ringAngle = vizRng() * Math.PI * 0.4 - Math.PI * 0.2;
-        const atmosphereOpacity = 0.10 + vizRng() * 0.15;
+        const atmosphereOpacity = 0.06 + vizRng() * 0.09;
         bodies.push({
           x: worldX,
           y: worldY,
@@ -390,7 +390,7 @@ function crash() {
 // ── Starfield ────────────────────────────────────────────────────────
 const STAR_TILE_SIZE = 512;
 const STAR_DENSITY = 80;    // stars per tile
-const PARALLAX = 0.15;      // stars drift at 15% of camera speed
+const PARALLAX = 0.05;      // stars drift at 5% of camera speed
 const STAR_COLORS = [
   [255, 255, 255], // white (most common)
   [255, 255, 255],
@@ -406,7 +406,7 @@ const STAR_COLORS = [
 
 // ── Nebula System ────────────────────────────────────────────────────
 const NEBULA_TILE_SIZE = 1024;
-const NEBULA_PARALLAX = 0.05;
+const NEBULA_PARALLAX = 0.02;
 const nebulaTileCache = new Map();
 const NEBULA_COLORS = [
   [70, 40, 180],   // deep blue (brightened)
@@ -419,31 +419,50 @@ const NEBULA_COLORS = [
   [140, 80, 50],   // amber (warm)
 ];
 
+function generateNebulaBlobs(tx, ty) {
+  const rng = mulberry32(chunkSeed(tx * 13 + 5000, ty * 13 + 5000));
+  const blobCount = 1 + Math.floor(rng() * 3);
+  const blobs = [];
+  for (let i = 0; i < blobCount; i++) {
+    blobs.push({
+      bx: rng() * NEBULA_TILE_SIZE,
+      by: rng() * NEBULA_TILE_SIZE,
+      br: 250 + rng() * 400,
+      nc: NEBULA_COLORS[Math.floor(rng() * NEBULA_COLORS.length)],
+      opacity: 0.08 + rng() * 0.07
+    });
+  }
+  return blobs;
+}
+
 function renderNebulaTile(tx, ty) {
   const oc = document.createElement('canvas');
   oc.width = NEBULA_TILE_SIZE;
   oc.height = NEBULA_TILE_SIZE;
   const c = oc.getContext('2d');
 
-  const rng = mulberry32(chunkSeed(tx * 13 + 5000, ty * 13 + 5000));
-  const blobCount = 1 + Math.floor(rng() * 3); // 1-3 blobs (every tile gets at least one)
-
-  for (let i = 0; i < blobCount; i++) {
-    const bx = rng() * NEBULA_TILE_SIZE;
-    const by = rng() * NEBULA_TILE_SIZE;
-    const br = 250 + rng() * 400;
-    const colorIdx = Math.floor(rng() * NEBULA_COLORS.length);
-    const nc = NEBULA_COLORS[colorIdx];
-    const opacity = 0.08 + rng() * 0.07;
-
-    const grad = c.createRadialGradient(bx, by, 0, bx, by, br);
-    grad.addColorStop(0, `rgba(${nc[0]}, ${nc[1]}, ${nc[2]}, ${opacity})`);
-    grad.addColorStop(0.5, `rgba(${nc[0]}, ${nc[1]}, ${nc[2]}, ${opacity * 0.5})`);
-    grad.addColorStop(1, 'transparent');
-    c.beginPath();
-    c.arc(bx, by, br, 0, Math.PI * 2);
-    c.fillStyle = grad;
-    c.fill();
+  // Render blobs from this tile and all 8 neighbors to eliminate seams
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      const ntx = tx + dx;
+      const nty = ty + dy;
+      const blobs = generateNebulaBlobs(ntx, nty);
+      for (const blob of blobs) {
+        const relX = blob.bx + dx * NEBULA_TILE_SIZE;
+        const relY = blob.by + dy * NEBULA_TILE_SIZE;
+        // Skip if blob doesn't overlap this tile
+        if (relX + blob.br < 0 || relX - blob.br > NEBULA_TILE_SIZE ||
+            relY + blob.br < 0 || relY - blob.br > NEBULA_TILE_SIZE) continue;
+        const grad = c.createRadialGradient(relX, relY, 0, relX, relY, blob.br);
+        grad.addColorStop(0, `rgba(${blob.nc[0]}, ${blob.nc[1]}, ${blob.nc[2]}, ${blob.opacity})`);
+        grad.addColorStop(0.5, `rgba(${blob.nc[0]}, ${blob.nc[1]}, ${blob.nc[2]}, ${blob.opacity * 0.5})`);
+        grad.addColorStop(1, 'transparent');
+        c.beginPath();
+        c.arc(relX, relY, blob.br, 0, Math.PI * 2);
+        c.fillStyle = grad;
+        c.fill();
+      }
+    }
   }
 
   return oc;
@@ -633,11 +652,11 @@ function renderPlanetToCache(body) {
   const rng = mulberry32(body.featureSeed);
 
   // ── Outer glow ──
-  const glowGrad = c.createRadialGradient(cx, cy, r * 0.6, cx, cy, r + pad * 0.5);
-  glowGrad.addColorStop(0, colorWithAlpha(body.color, 0.18));
+  const glowGrad = c.createRadialGradient(cx, cy, r * 0.6, cx, cy, r + pad * 0.35);
+  glowGrad.addColorStop(0, colorWithAlpha(body.color, 0.10));
   glowGrad.addColorStop(1, 'transparent');
   c.beginPath();
-  c.arc(cx, cy, r + pad * 0.5, 0, Math.PI * 2);
+  c.arc(cx, cy, r + pad * 0.35, 0, Math.PI * 2);
   c.fillStyle = glowGrad;
   c.fill();
 
@@ -645,9 +664,9 @@ function renderPlanetToCache(body) {
   const lightX = cx - r * 0.35;
   const lightY = cy - r * 0.35;
   const sphereGrad = c.createRadialGradient(lightX, lightY, r * 0.05, cx, cy, r);
-  sphereGrad.addColorStop(0, hslToString(hsl.h, hsl.s * 0.7, Math.min(80, hsl.l + 18)));
+  sphereGrad.addColorStop(0, hslToString(hsl.h, hsl.s * 0.7, Math.min(65, hsl.l + 10)));
   sphereGrad.addColorStop(0.5, body.color);
-  sphereGrad.addColorStop(1, hslToString(hsl.h, hsl.s * 0.9, Math.max(8, hsl.l - 25)));
+  sphereGrad.addColorStop(1, hslToString(hsl.h, hsl.s * 0.9, Math.max(8, hsl.l - 35)));
   c.beginPath();
   c.arc(cx, cy, r, 0, Math.PI * 2);
   c.fillStyle = sphereGrad;
@@ -667,7 +686,7 @@ function renderPlanetToCache(body) {
         const hueShift = (rng() - 0.5) * 30;
         const lShift = (rng() - 0.5) * 15;
         c.fillStyle = hslToString(hsl.h + hueShift, hsl.s, hsl.l + lShift);
-        c.globalAlpha = 0.2 + rng() * 0.15;
+        c.globalAlpha = 0.12 + rng() * 0.10;
         c.fillRect(cx - r, cy - r + b * bandH, r * 2, bandH);
       }
       break;
@@ -683,13 +702,13 @@ function renderPlanetToCache(body) {
         c.beginPath();
         c.arc(crX, crY, crR, 0, Math.PI * 2);
         c.fillStyle = hslToString(hsl.h, hsl.s * 0.5, Math.max(5, hsl.l - 20));
-        c.globalAlpha = 0.35 + rng() * 0.2;
+        c.globalAlpha = 0.20 + rng() * 0.15;
         c.fill();
         // Crater rim highlight
         c.beginPath();
         c.arc(crX - crR * 0.2, crY - crR * 0.2, crR * 0.6, 0, Math.PI * 2);
         c.fillStyle = hslToString(hsl.h, hsl.s * 0.4, hsl.l - 10);
-        c.globalAlpha = 0.15;
+        c.globalAlpha = 0.10;
         c.fill();
       }
       break;
@@ -703,10 +722,10 @@ function renderPlanetToCache(body) {
         const spY = cy + Math.sin(angle) * dist;
         const spR = r * (0.08 + rng() * 0.1);
         const hotGrad = c.createRadialGradient(spX, spY, 0, spX, spY, spR);
-        hotGrad.addColorStop(0, 'rgba(255, 220, 160, 0.5)');
-        hotGrad.addColorStop(0.4, 'rgba(255, 150, 50, 0.3)');
+        hotGrad.addColorStop(0, 'rgba(255, 220, 160, 0.3)');
+        hotGrad.addColorStop(0.4, 'rgba(255, 150, 50, 0.15)');
         hotGrad.addColorStop(1, 'rgba(255, 80, 20, 0)');
-        c.globalAlpha = 0.45 + rng() * 0.2;
+        c.globalAlpha = 0.30 + rng() * 0.15;
         c.beginPath();
         c.arc(spX, spY, spR, 0, Math.PI * 2);
         c.fillStyle = hotGrad;
@@ -720,7 +739,7 @@ function renderPlanetToCache(body) {
       for (let b = 0; b < bandCount; b++) {
         const lShift = (rng() - 0.5) * 8;
         c.fillStyle = hslToString(hsl.h, hsl.s * 0.8, hsl.l + lShift);
-        c.globalAlpha = 0.12 + rng() * 0.08;
+        c.globalAlpha = 0.08 + rng() * 0.06;
         c.fillRect(cx - r, cy - r + b * bandH, r * 2, bandH);
       }
       break;
@@ -737,7 +756,7 @@ function renderPlanetToCache(body) {
         c.arc(cx + arcOffX, cy + arcOffY, arcR, startAngle, startAngle + arcLen);
         c.strokeStyle = hslToString(hsl.h + (rng() - 0.5) * 40, hsl.s, Math.min(85, hsl.l + 15));
         c.lineWidth = r * (0.06 + rng() * 0.08);
-        c.globalAlpha = 0.25 + rng() * 0.15;
+        c.globalAlpha = 0.15 + rng() * 0.10;
         c.stroke();
       }
       break;
